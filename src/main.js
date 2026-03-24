@@ -1,47 +1,47 @@
-// ── Fase 1: Chart.js como módulo npm (reemplaza el CDN del HTML) ──
+// ── Fase 2: módulos propios ──────────────────────────────────────────────────
 import Chart from 'chart.js/auto'
-
-const COLORS=['#2d7ff9','#00d4a0','#0ea5c9','#fbbf24','#818cf8','#ec4899','#10b981','#f97316','#06b6d4','#84cc16'];
-const DAY_NAMES_SHORT=['L','M','X','J','V','S','D'];
-const DAY_NAMES_FULL=['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
+import {
+  COLORS, DAY_NAMES_SHORT, DAY_NAMES_FULL,
+  fmtMs, fmtMin, fmtH,
+  localDate, today, fmtTime, fmtDateShort,
+  timeRangeMinutes,
+  getMon, getWeekDays, getRange,
+} from './utils.js';
+import {
+  entriesByDate, totalMinutes, weeklyMinutes,
+  minutesByCategory, entriesInRange,
+  catColorFor, validatePersistedState,
+  calcElapsedMs, TIMER_DEFAULT,
+} from './store.js';
 
 /* FIX: XSS — escape user data before inserting into DOM */
 function esc(s){const d=document.createElement('div');d.textContent=String(s||'');return d.innerHTML;}
 
-let S={categories:['Reuniones','Desarrollo','Diseño','Gestión','Formación','Admin'],entries:[],timer:{on:false,paused:false,start:null,elapsed:0,task:'',cat:'',startWall:null},notif:false,palette:'',goals:[8,8,8,8,8,0,0],notifInterval:30,notifMode:'both'};
+let S={categories:['Reuniones','Desarrollo','Diseño','Gestión','Formación','Admin'],entries:[],timer:{...TIMER_DEFAULT},notif:false,palette:'',goals:[8,8,8,8,8,0,0],notifInterval:30,notifMode:'both'};
 let weekOffset=0, charts={}, tInterval=null, notifInterval=null;
 
+/* Wrapper que usa el estado global S */
+function catColor(c){return catColorFor(S.categories,c);}
+
 function save(){try{localStorage.setItem('tf1',JSON.stringify(S))}catch(e){}}
-/* FIX: robust load with type validation — no silent corruption */
+/* Usa validatePersistedState de store.js para validación robusta */
 function load(){
   try{
     const raw=localStorage.getItem('tf1');if(!raw)return;
     const p=JSON.parse(raw);
-    if(p&&typeof p==='object'){
-      if(Array.isArray(p.categories))S.categories=p.categories;
-      if(Array.isArray(p.entries))S.entries=p.entries;
-      if(p.timer&&typeof p.timer==='object')S.timer={...S.timer,...p.timer};
-      if(typeof p.notif==='boolean')S.notif=p.notif;
-      if(typeof p.palette==='string')S.palette=p.palette;
-      if(Array.isArray(p.goals)&&p.goals.length===7)S.goals=p.goals;
-      if(typeof p.notifInterval==='number'&&p.notifInterval>=1&&p.notifInterval<=240)S.notifInterval=p.notifInterval;
-      if(typeof p.notifMode==='string'&&['both','active','inactive'].includes(p.notifMode))S.notifMode=p.notifMode;
-    }
+    const valid=validatePersistedState(p);
+    if(valid.categories)  S.categories=valid.categories;
+    if(valid.entries)     S.entries=valid.entries;
+    if(valid.timer)       S.timer={...S.timer,...valid.timer};
+    if(valid.notif!==undefined)       S.notif=valid.notif;
+    if(valid.palette!==undefined)     S.palette=valid.palette;
+    if(valid.goals)       S.goals=valid.goals;
+    if(valid.notifInterval!==undefined) S.notifInterval=valid.notifInterval;
+    if(valid.notifMode!==undefined)   S.notifMode=valid.notifMode;
     /* FIX: paused timer on reload — start is null, elapsed is correct */
     if(S.timer.on&&S.timer.paused){S.timer.start=null;}
   }catch(e){console.warn('TimeFlow: localStorage corrupted, resetting.',e);try{localStorage.removeItem('tf1');}catch(e2){}}
 }
-
-function fmtMs(ms){const s=Math.floor(ms/1000),h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sc=s%60;return`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sc).padStart(2,'0')}`}
-function fmtMin(m){if(!m||m<=0)return'0m';const h=Math.floor(m/60),mn=m%60;if(h>0&&mn>0)return`${h}h ${mn}m`;if(h>0)return`${h}h`;return`${mn}m`}
-function fmtH(m){return(m/60).toFixed(1)+'h'}
-function localDate(d){return`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`}
-function today(){return localDate(new Date())}
-function fmtTime(d){return d?new Date(d).toLocaleTimeString('es-ES',{hour:'2-digit',minute:'2-digit'}):'--:--'}
-function fmtDateShort(s){return new Date(s+'T00:00:00').toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short'})}
-function catColor(c){const i=S.categories.indexOf(c);return COLORS[i%COLORS.length]||'#5c7fa0'}
-/* FIX: midnight-crossing time ranges */
-function timeRangeMinutes(sh,sm,eh,em){let m=(eh*60+em)-(sh*60+sm);if(m<=0)m+=1440;return m;}
 
 /* NOTIF */
 function toggleNotif(){
@@ -145,11 +145,7 @@ function stopT(){
   save();updateTimerUI();renderAll();
   showToast('✓ Entrada guardada correctamente');
 }
-function getCurrentMs(){
-  if(!S.timer.on)return 0;
-  if(S.timer.paused)return S.timer.elapsed;
-  return S.timer.elapsed+(S.timer.start?Date.now()-S.timer.start:0);
-}
+function getCurrentMs(){ return calcElapsedMs(S.timer); }
 function tickT(){
   if(S.timer.on&&!S.timer.paused){
     const ms=getCurrentMs();
@@ -214,9 +210,9 @@ function addM(){
 function rHist(){renderHist(document.getElementById('h-date').value||today());}
 function renderHist(d){
   const el=document.getElementById('hist-list');
-  const ents=S.entries.filter(e=>e.date===d).sort((a,b)=>b.id-a.id);
+  const ents=entriesByDate(S.entries,d).sort((a,b)=>b.id-a.id);
   if(!ents.length){el.innerHTML='<div class="empty">Sin entradas este día.</div>';return;}
-  const total=ents.reduce((a,e)=>a+e.minutes,0);
+  const total=totalMinutes(ents);
   el.innerHTML='';
   const hdr=document.createElement('div');hdr.className='hist-hdr';
   const hLeft=document.createElement('span');hLeft.textContent=`${ents.length} entrada${ents.length>1?'s':''}`;
@@ -251,13 +247,11 @@ function exportCSV(){
 }
 
 /* SEMANA */
-function getMon(off=0){const d=new Date();const dy=d.getDay();const diff=(dy+6)%7;d.setDate(d.getDate()-diff+off*7);return localDate(d);}
-function getWeekDays(mon){const days=[];for(let i=0;i<7;i++){const d=new Date(mon+'T00:00:00');d.setDate(d.getDate()+i);days.push(localDate(d));}return days;}
 function shiftW(d){weekOffset+=d;renderSemana();}
 function renderSemana(){
   const mon=getMon(weekOffset);const days=getWeekDays(mon);
   document.getElementById('w-lbl').textContent=`${fmtDateShort(days[0])} – ${fmtDateShort(days[6])}`;
-  const dayMins=days.map(d=>S.entries.filter(e=>e.date===d).reduce((a,e)=>a+e.minutes,0));
+  const dayMins=weeklyMinutes(S.entries,days);
   const total=dayMins.reduce((a,b)=>a+b,0);
   const worked=dayMins.filter(m=>m>0).length;
   const avg=total/7;
@@ -272,7 +266,8 @@ function renderSemana(){
     data:{labels:['L','M','X','J','V','S','D'],datasets:[{data:dayMins.map(m=>parseFloat((m/60).toFixed(2))),backgroundColor:dayMins.map((_,i)=>i<5?'rgba(45,127,249,.3)':'rgba(0,212,160,.2)'),borderColor:dayMins.map((_,i)=>i<5?'#2d7ff9':'#00d4a0'),borderWidth:1.5,borderRadius:6,borderSkipped:false}]},
     options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:ctx=>` ${fmtMin(Math.round(ctx.raw*60))}`}}},scales:{y:{ticks:{callback:v=>v+'h',color:'#5c7fa0',font:{family:'IBM Plex Mono',size:11}},grid:{color:'rgba(255,255,255,.04)'},border:{display:false}},x:{grid:{display:false},ticks:{color:'#94b4d4',font:{family:'IBM Plex Mono',size:12}},border:{display:false}}}}
   });
-  const bycat={};days.forEach(d=>S.entries.filter(e=>e.date===d).forEach(e=>{const k=e.cat||'Sin cat';bycat[k]=(bycat[k]||0)+e.minutes;}));
+  const weekEntries=days.flatMap(d=>entriesByDate(S.entries,d));
+  const bycat=minutesByCategory(weekEntries);
   const wc=document.getElementById('w-cats');
   if(!Object.keys(bycat).length){wc.innerHTML='<div class="empty">Sin datos esta semana.</div>';return;}
   wc.innerHTML=Object.entries(bycat).sort((a,b)=>b[1]-a[1]).map(([c,m])=>{
@@ -282,19 +277,12 @@ function renderSemana(){
 }
 
 /* RESUMEN */
-function getRange(range){
-  const n=new Date(),d=today();
-  if(range==='today')return[d,d];
-  if(range==='week'){const m=getMon(0);return[m,getWeekDays(m)[6]];}
-  if(range==='month')return[localDate(new Date(n.getFullYear(),n.getMonth(),1)),d];
-  return['0000-00-00',d];
-}
 function rResumen(){
   const range=document.getElementById('r-range').value;
   const[from,to]=getRange(range);
-  const ents=S.entries.filter(e=>e.date>=from&&e.date<=to);
-  const total=ents.reduce((a,e)=>a+e.minutes,0);
-  const bycat={};ents.forEach(e=>{const k=e.cat||'Sin cat';bycat[k]=(bycat[k]||0)+e.minutes;});
+  const ents=entriesInRange(S.entries,from,to);
+  const total=totalMinutes(ents);
+  const bycat=minutesByCategory(ents);
   const days=new Set(ents.map(e=>e.date)).size;
   document.getElementById('r-metrics').innerHTML=`
     <div class="kpi green"><div class="kpi-label">Total horas</div><div class="kpi-val">${fmtH(total)}</div></div>
