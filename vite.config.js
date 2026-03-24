@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  // base: './' permite que GitHub Pages sirva los assets correctamente
-  // independientemente del nombre del repositorio
-  base: './',
+  // Para GitHub Pages con repo en subdirectorio /time-control-dev/
+  // base debe coincidir con el nombre del repo
+  base: '/time-control-dev/',
   build: {
     outDir: 'dist',
   },
