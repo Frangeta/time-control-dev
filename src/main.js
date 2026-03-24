@@ -65,8 +65,21 @@ function loadLocal(){
   }catch(e){console.warn('TimeFlow: localStorage corrupted.',e);try{localStorage.removeItem('tf1');}catch(e2){}}
 }
 
-/* Carga desde Firestore + migra datos locales si es la primera vez */
+/* Reinicia S a los valores por defecto (aislamiento entre usuarios) */
+function resetState(){
+  S.categories=['Reuniones','Desarrollo','Diseño','Gestión','Formación','Admin'];
+  S.entries=[];
+  S.timer={...TIMER_DEFAULT};
+  S.notif=false;
+  S.palette='';
+  S.goals=[8,8,8,8,8,0,0];
+  S.notifInterval=30;
+  S.notifMode='both';
+}
+
+/* Carga desde Firestore. Siempre parte de estado vacío — sin migración localStorage. */
 async function loadFromFirestore(uid){
+  resetState(); // ← garantiza aislamiento: el nuevo usuario nunca ve datos de otro
   try{
     const[settings,entries]=await Promise.all([loadUserSettings(uid),loadEntries(uid)]);
     if(settings){
@@ -82,17 +95,11 @@ async function loadFromFirestore(uid){
     }
     if(entries.length>0){
       S.entries=entries;
-    } else {
-      /* Primera vez: migrar entradas de localStorage a Firestore */
-      loadLocal();
-      if(S.entries.length>0){
-        await saveAllEntries(uid,S.entries);
-        console.info(`TimeFlow: ${S.entries.length} entradas migradas a Firestore.`);
-      }
     }
+    // Usuario nuevo sin datos → empieza con estado vacío (ya reseteado arriba)
   }catch(e){
-    console.warn('TimeFlow: error cargando Firestore, usando localStorage.',e);
-    loadLocal();
+    console.warn('TimeFlow: error cargando Firestore.',e);
+    // No cargamos localStorage: mantener estado vacío para este usuario
   }
 }
 
@@ -715,6 +722,8 @@ initAuth(
     currentUser=null;
     clearInterval(tInterval);tInterval=null;
     stopNotifCycle();
+    resetState(); // ← limpia el estado en memoria
+    try{localStorage.removeItem('tf1');}catch(e){} // ← evita fuga de datos entre usuarios
     showAuthModal();
     setAuthLoading(false);
   }
