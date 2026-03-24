@@ -1,5 +1,14 @@
-// ── Fase 2: módulos propios ──────────────────────────────────────────────────
+// ── Fase 3: Firebase Auth + Firestore ───────────────────────────────────────
 import Chart from 'chart.js/auto'
+import {
+  initAuth, login, register, logout,
+  createAuthModal, showAuthModal, hideAuthModal,
+  authSwitchTab, showAuthError, setAuthLoading,
+} from './auth.js';
+import {
+  loadUserSettings, saveUserSettings,
+  loadEntries, saveEntry, deleteEntry as dbDeleteEntry, saveAllEntries,
+} from './db.js';
 import {
   COLORS, DAY_NAMES_SHORT, DAY_NAMES_FULL,
   fmtMs, fmtMin, fmtH,
@@ -19,13 +28,27 @@ function esc(s){const d=document.createElement('div');d.textContent=String(s||''
 
 let S={categories:['Reuniones','Desarrollo','Diseño','Gestión','Formación','Admin'],entries:[],timer:{...TIMER_DEFAULT},notif:false,palette:'',goals:[8,8,8,8,8,0,0],notifInterval:30,notifMode:'both'};
 let weekOffset=0, charts={}, tInterval=null, notifInterval=null;
+let currentUser=null; // usuario Firebase activo
 
 /* Wrapper que usa el estado global S */
 function catColor(c){return catColorFor(S.categories,c);}
 
-function save(){try{localStorage.setItem('tf1',JSON.stringify(S))}catch(e){}}
-/* Usa validatePersistedState de store.js para validación robusta */
-function load(){
+/* Guarda en localStorage (cache local) + Firestore (cloud) */
+function save(){
+  try{localStorage.setItem('tf1',JSON.stringify(S))}catch(e){}
+  if(currentUser){
+    const settings={
+      categories:S.categories,goals:S.goals,
+      notif:S.notif,palette:S.palette,
+      notifInterval:S.notifInterval,notifMode:S.notifMode,
+      timer:S.timer,
+    };
+    saveUserSettings(currentUser.uid,settings).catch(e=>console.warn('Firestore save:',e));
+  }
+}
+
+/* Carga desde localStorage (sin usuario) */
+function loadLocal(){
   try{
     const raw=localStorage.getItem('tf1');if(!raw)return;
     const p=JSON.parse(raw);
@@ -38,9 +61,39 @@ function load(){
     if(valid.goals)       S.goals=valid.goals;
     if(valid.notifInterval!==undefined) S.notifInterval=valid.notifInterval;
     if(valid.notifMode!==undefined)   S.notifMode=valid.notifMode;
-    /* FIX: paused timer on reload — start is null, elapsed is correct */
     if(S.timer.on&&S.timer.paused){S.timer.start=null;}
-  }catch(e){console.warn('TimeFlow: localStorage corrupted, resetting.',e);try{localStorage.removeItem('tf1');}catch(e2){}}
+  }catch(e){console.warn('TimeFlow: localStorage corrupted.',e);try{localStorage.removeItem('tf1');}catch(e2){}}
+}
+
+/* Carga desde Firestore + migra datos locales si es la primera vez */
+async function loadFromFirestore(uid){
+  try{
+    const[settings,entries]=await Promise.all([loadUserSettings(uid),loadEntries(uid)]);
+    if(settings){
+      const valid=validatePersistedState(settings);
+      if(valid.categories)  S.categories=valid.categories;
+      if(valid.timer)       S.timer={...S.timer,...valid.timer};
+      if(valid.notif!==undefined)       S.notif=valid.notif;
+      if(valid.palette!==undefined)     S.palette=valid.palette;
+      if(valid.goals)       S.goals=valid.goals;
+      if(valid.notifInterval!==undefined) S.notifInterval=valid.notifInterval;
+      if(valid.notifMode!==undefined)   S.notifMode=valid.notifMode;
+      if(S.timer.on&&S.timer.paused){S.timer.start=null;}
+    }
+    if(entries.length>0){
+      S.entries=entries;
+    } else {
+      /* Primera vez: migrar entradas de localStorage a Firestore */
+      loadLocal();
+      if(S.entries.length>0){
+        await saveAllEntries(uid,S.entries);
+        console.info(`TimeFlow: ${S.entries.length} entradas migradas a Firestore.`);
+      }
+    }
+  }catch(e){
+    console.warn('TimeFlow: error cargando Firestore, usando localStorage.',e);
+    loadLocal();
+  }
 }
 
 /* NOTIF */
@@ -137,12 +190,15 @@ function stopT(){
   const ms=S.timer.elapsed+(S.timer.paused?0:(S.timer.start?endWall-S.timer.start:0));
   if(ms<1000){showToast('⚠ Mínimo 1 segundo.');return;}
   const min=Math.round(ms/60000)||1;
-  S.entries.push({id:endWall,date:today(),task:S.timer.task||'Sin nombre',cat:S.timer.cat||'',minutes:min,startWall:S.timer.startWall,endWall});
+  const entry={id:endWall,date:today(),task:S.timer.task||'Sin nombre',cat:S.timer.cat||'',minutes:min,startWall:S.timer.startWall,endWall};
+  S.entries.push(entry);
   S.timer={on:false,paused:false,start:null,elapsed:0,task:'',cat:'',startWall:null};
   clearInterval(tInterval);tInterval=null;
   document.getElementById('t-task').value='';
   document.title='TimeFlow — Seguimiento de tiempo';
-  save();updateTimerUI();renderAll();
+  save();
+  if(currentUser)saveEntry(currentUser.uid,entry).catch(e=>console.warn('Firestore entry:',e));
+  updateTimerUI();renderAll();
   showToast('✓ Entrada guardada correctamente');
 }
 function getCurrentMs(){ return calcElapsedMs(S.timer); }
@@ -198,12 +254,15 @@ function addM(){
     min=h*60+m;
   }
   if(min<=0){msg.style.color='var(--red)';msg.textContent='⚠ Introduce una duración o rango.';return;}
-  S.entries.push({id:Date.now(),date,task,cat,minutes:min,startWall:sw,endWall:ew});
+  const newEntry={id:Date.now(),date,task,cat,minutes:min,startWall:sw,endWall:ew};
+  S.entries.push(newEntry);
   ['m-task','m-h','m-min','m-start','m-end'].forEach(id=>document.getElementById(id).value='');
   document.getElementById('m-date').value=today();
   msg.style.color='var(--green)';msg.textContent='✓ Entrada añadida correctamente.';
   setTimeout(()=>msg.textContent='',2500);
-  save();renderAll();
+  save();
+  if(currentUser)saveEntry(currentUser.uid,newEntry).catch(e=>console.warn('Firestore entry:',e));
+  renderAll();
 }
 
 /* HISTORIAL */
@@ -236,7 +295,11 @@ function renderHist(d){
     el.appendChild(row);
   });
 }
-function delEntry(id){S.entries=S.entries.filter(e=>e.id!==id);save();renderAll();rHist();}
+function delEntry(id){
+  S.entries=S.entries.filter(e=>e.id!==id);save();
+  if(currentUser)dbDeleteEntry(currentUser.uid,id).catch(e=>console.warn('Firestore del:',e));
+  renderAll();rHist();
+}
 function exportCSV(){
   const rows=[['Fecha','Tarea','Categoría','Inicio','Fin','Minutos','Horas']];
   S.entries.sort((a,b)=>a.date.localeCompare(b.date)).forEach(e=>{
@@ -510,7 +573,9 @@ function saveEdit(){
   }
   if(min<=0){msg.style.color='var(--red)';msg.textContent='⚠ Introduce una duración o rango.';return;}
   S.entries[idx]={...S.entries[idx],task,cat,date,minutes:min,startWall:sw,endWall:ew};
-  save();renderAll();
+  save();
+  if(currentUser)saveEntry(currentUser.uid,S.entries[idx]).catch(e=>console.warn('Firestore edit:',e));
+  renderAll();
   /* FIX: refresh historial if it's the active panel */
   const activeTab=document.querySelector('.nav-item.active')?.getAttribute('onclick')?.match(/'(\w+)'/)?.[1];
   if(activeTab==='historial')renderHist(document.getElementById('h-date').value||today());
@@ -577,17 +642,80 @@ Object.assign(window, {
   toggleNotif, addCat, rmCat, startT, pauseT, resumeT, stopT,
   addM, rHist, exportCSV, shiftW, openEdit, closeEditModal, closeEdit,
   saveEdit, applyPalette, cfgTab, applyNotifSettings, openCfg, closeCfg,
-  closeCfgOuter, saveGoals, hmHover, hmLeave, sw, rResumen, updateGoalTotal
+  closeCfgOuter, saveGoals, hmHover, hmLeave, sw, rResumen, updateGoalTotal,
+  // Auth
+  authSwitchTab,
+  authLogout: async()=>{await logout();showToast('Sesión cerrada.');},
+  authSubmit: async(ev)=>{
+    ev.preventDefault();
+    const email=document.getElementById('auth-email').value.trim();
+    const pass=document.getElementById('auth-pass').value;
+    const mode=document.getElementById('auth-form').dataset.mode||'login';
+    setAuthLoading(true);
+    try{
+      if(mode==='register') await register(email,pass);
+      else                   await login(email,pass);
+      // onAuthStateChanged se encarga del resto
+    }catch(e){
+      setAuthLoading(false);
+      const msgs={
+        'auth/user-not-found':'Usuario no encontrado.',
+        'auth/wrong-password':'Contraseña incorrecta.',
+        'auth/email-already-in-use':'Este correo ya tiene cuenta.',
+        'auth/invalid-email':'Correo electrónico inválido.',
+        'auth/weak-password':'La contraseña es demasiado débil (mín. 6 caracteres).',
+        'auth/invalid-credential':'Credenciales incorrectas.',
+      };
+      showAuthError(msgs[e.code]||`Error: ${e.message}`);
+    }
+  },
 });
 
-/* INIT */
-load();
-if(S.palette){currentPalette=S.palette;document.body.classList.add('theme-'+S.palette);}
-const _d=new Date();
-document.getElementById('today-date').textContent=_d.toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
-document.getElementById('h-date').value=today();
-document.getElementById('m-date').value=today();
-populateSels();renderAll();updateNotifBtn();
-if(S.timer.on&&!S.timer.paused&&S.timer.start){tInterval=setInterval(tickT,500);}
-updateTimerUI();
-if(S.notif&&typeof Notification!=='undefined'&&Notification.permission==='granted')startNotifCycle();
+/* INIT — El flujo real empieza aquí via Firebase Auth */
+function initApp(){
+  const _d=new Date();
+  document.getElementById('today-date').textContent=_d.toLocaleDateString('es-ES',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+}
+
+function startAppUI(){
+  if(S.palette){currentPalette=S.palette;document.body.classList.add('theme-'+S.palette);}
+  document.getElementById('h-date').value=today();
+  document.getElementById('m-date').value=today();
+  populateSels();renderAll();updateNotifBtn();
+  if(S.timer.on&&!S.timer.paused&&S.timer.start){tInterval=setInterval(tickT,500);}
+  updateTimerUI();
+  if(S.notif&&typeof Notification!=='undefined'&&Notification.permission==='granted')startNotifCycle();
+}
+
+// Crear modal de auth y mostrar mientras se comprueba el estado
+createAuthModal();
+initApp();
+
+initAuth(
+  async(user)=>{
+    currentUser=user;
+    await loadFromFirestore(user.uid);
+    startAppUI();
+    hideAuthModal();
+    // Añadir botón logout a la topbar si no existe
+    if(!document.getElementById('logout-btn')){
+      const btn=document.createElement('button');
+      btn.id='logout-btn';
+      btn.title='Cerrar sesión';
+      btn.textContent='⎋';
+      btn.style.cssText='background:none;border:none;cursor:pointer;color:var(--text3);font-size:16px;padding:4px 8px;border-radius:6px;transition:color .15s';
+      btn.onmouseenter=()=>btn.style.color='var(--red,#ef4444)';
+      btn.onmouseleave=()=>btn.style.color='var(--text3)';
+      btn.onclick=()=>window.authLogout();
+      const topbar=document.querySelector('.topbar-right')||document.querySelector('.topbar');
+      if(topbar)topbar.appendChild(btn);
+    }
+  },
+  ()=>{
+    currentUser=null;
+    clearInterval(tInterval);tInterval=null;
+    stopNotifCycle();
+    showAuthModal();
+    setAuthLoading(false);
+  }
+);
