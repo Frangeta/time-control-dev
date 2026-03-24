@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx --yes serve --version)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(cmd /c \"tree C:\\\\Users\\\\fsantos\\\\Downloads\\\\timetracker /F 2>nul\")",
+      "Bash(cmd /c \"gh repo view https://github.com/Frangeta/time-control-dev --json name,defaultBranchRef,description 2>nul || echo gh_not_available\")",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
